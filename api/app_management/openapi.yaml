@@ -306,6 +306,42 @@ paths:
         "500":
           $ref: "#/components/responses/ResponseInternalServerError"
 
+  /appstore/{id}/apps/{app}/icon:
+    get:
+      summary: Serve a catalogue app icon from this store's workdir
+      description: |
+        Reads `Apps/{app}/icon.png` (or `.jpg`, `.webp`, `.svg`) from the registered
+        store's unpacked workdir. Relative `x-casaos.icon` values are rewritten to this
+        path when StoreInfo is assembled. Same JWT as other appstore GETs.
+      operationId: appStoreAppIcon
+      tags:
+        - AppStore methods
+      parameters:
+        - $ref: "#/components/parameters/AppStoreID"
+        - $ref: "#/components/parameters/AppStoreAppID"
+      responses:
+        "200":
+          description: The icon file
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            image/svg+xml:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/ResponseNotFound"
+
   /categories:
     get:
       summary: Get the list of app categories
@@ -2607,6 +2643,15 @@ components:
       schema:
         type: integer
         example: 0
+
+    AppStoreAppID:
+      name: app
+      description: Store app ID whose icon to serve
+      in: path
+      required: true
+      schema:
+        type: string
+        example: "immich"
 
     StoreAppIDString:
       name: id

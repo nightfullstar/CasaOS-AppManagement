@@ -893,7 +893,7 @@ func composeAppsWithStoreInfo(ctx context.Context, opts composeAppsWithStoreInfo
 		// not running: greyed out, on a stack whose containers are all up. Store info is
 		// presentation, and its absence is not a reason to stop answering what the app is
 		// DOING. Only the store info goes missing; the status below is still read.
-		storeInfo, err := composeApp.StoreInfo(true)
+		storeInfo, err := service.MyService.AppStoreManagement().ComposeStoreInfo(composeApp, true)
 		if err != nil && !errors.Is(err, service.ErrComposeExtensionNameXCasaOSNotFound) {
 			logger.Error("failed to get store info", zap.Error(err), zap.String("composeAppID", id))
 			return composeAppWithStoreInfo

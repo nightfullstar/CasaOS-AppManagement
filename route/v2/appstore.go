@@ -147,7 +147,7 @@ func (a *AppManagement) ComposeAppStoreInfoList(ctx echo.Context, params codegen
 
 	// list
 	list := lo.MapValues(catalog, func(composeApp *service.ComposeApp, appStoreID string) codegen.ComposeAppStoreInfo {
-		storeInfo, err := composeApp.StoreInfo(true)
+		storeInfo, err := service.MyService.AppStoreManagement().ComposeStoreInfo(composeApp, true)
 		if err != nil {
 			logger.Error("failed to get store info", zap.Error(err), zap.String("appStoreID", appStoreID))
 			return codegen.ComposeAppStoreInfo{}
@@ -204,7 +204,7 @@ func (a *AppManagement) ComposeAppStoreInfo(ctx echo.Context, id codegen.StoreAp
 		})
 	}
 
-	storeInfo, err := composeApp.StoreInfo(true)
+	storeInfo, err := service.MyService.AppStoreManagement().ComposeStoreInfo(composeApp, true)
 	if err != nil {
 		return ctx.JSON(http.StatusInternalServerError, codegen.ResponseInternalServerError{
 			Message: utils.Ptr(err.Error()),
@@ -300,7 +300,7 @@ func (a *AppManagement) ComposeApp(ctx echo.Context, id codegen.StoreAppIDString
 		return ctx.String(http.StatusOK, string(yaml))
 	}
 
-	storeInfo, err := composeApp.StoreInfo(false)
+	storeInfo, err := service.MyService.AppStoreManagement().ComposeStoreInfo(composeApp, false)
 	if err != nil {
 		message := err.Error()
 		return ctx.JSON(http.StatusInternalServerError, codegen.ResponseInternalServerError{
@@ -400,7 +400,6 @@ func FilterCatalogByArchitecture(catalog map[string]*service.ComposeApp, arch st
 	})
 }
 
-
 func upgradableAppTitle(storeInfo *codegen.ComposeAppStoreInfo, fallback string) string {
 	if storeInfo != nil {
 		if t := storeInfo.Title[common.DefaultLanguage]; t != "" {
@@ -424,7 +423,7 @@ func (a *AppManagement) UpgradableAppList(ctx echo.Context) error {
 			continue
 		}
 
-		storeInfo, err := composeApp.StoreInfo(true)
+		storeInfo, err := service.MyService.AppStoreManagement().ComposeStoreInfo(composeApp, true)
 		if err != nil {
 			logger.Error("failed to get store info", zap.Error(err), zap.String("appStoreID", id))
 			continue
