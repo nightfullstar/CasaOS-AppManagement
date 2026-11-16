@@ -27,8 +27,22 @@ import (
 const mirrorZip = "https://raw.githubusercontent.com/ReCasaOS/_appstore/main/store/main.zip"
 
 // recasaosCatalogue is the store a ReCasaOS box names by default: IceWhale's
-// apps, RoqueOS's and our Big Bear fork's merged every night.
-const recasaosCatalogue = "https://raw.githubusercontent.com/ReCasaOS/_appstore/catalogue/store/recasaos.zip"
+// apps, RoqueOS's and our Big Bear fork's merged every night, served from
+// recasaos.org. GitHub is the copy, not the source.
+const recasaosCatalogue = "https://recasaos.org/store/recasaos.zip"
+
+// recasaosCatalogueGitHub is the same bytes as a GitHub Release asset.
+const recasaosCatalogueGitHub = "https://github.com/ReCasaOS/_appstore/releases/latest/download/recasaos.zip"
+
+// recasaosCatalogueIndex is the publication record next to the org zip.
+const recasaosCatalogueIndex = "https://recasaos.org/store/store-index.json"
+
+// recasaosCatalogueGitHubIndex is that same record on the GitHub Release.
+const recasaosCatalogueGitHubIndex = "https://github.com/ReCasaOS/_appstore/releases/latest/download/store-index.json"
+
+// recasaosCatalogueGitHubRaw is the URL a box still names if it was installed
+// before the org became the default.
+const recasaosCatalogueGitHubRaw = "https://raw.githubusercontent.com/ReCasaOS/_appstore/catalogue/store/recasaos.zip"
 
 // catalogueMirrors maps a catalogue's URL to this distribution's copy of it.
 var catalogueMirrors = map[string]string{
@@ -36,8 +50,24 @@ var catalogueMirrors = map[string]string{
 	"https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@gh-pages/store/main.zip": mirrorZip,
 	// the URL a box installed before that, and upgraded, still carries
 	"https://github.com/IceWhaleTech/_appstore/archive/refs/heads/main.zip": mirrorZip,
-	// the ReCasaOS catalogue (github.com/ReCasaOS/_appstore, branch catalogue): the same bytes through jsdelivr
-	recasaosCatalogue: "https://cdn.jsdelivr.net/gh/ReCasaOS/_appstore@catalogue/store/recasaos.zip",
+	// the ReCasaOS catalogue: org first, then the GitHub Release zip
+	recasaosCatalogue: recasaosCatalogueGitHub,
+	// a box that still names the old raw GitHub zip tries the org next
+	recasaosCatalogueGitHubRaw: recasaosCatalogue,
+}
+
+// deadStores maps a store URL that will never answer again to the catalogue
+// that replaces it. The dashboard offers the switch; this table does not
+// rewrite the box's configuration.
+var deadStores = map[string]string{
+	"https://github.com/bigbeartechworld/big-bear-casaos/archive/refs/heads/master.zip": recasaosCatalogue,
+}
+
+// SuccessorOf reports whether url is a known-dead store and, if so, the
+// catalogue that replaces it.
+func SuccessorOf(url string) (successor string, dead bool) {
+	successor, dead = deadStores[url]
+	return
 }
 
 // pickCatalogueSource asks the catalogue's URL whether it answers, and its
