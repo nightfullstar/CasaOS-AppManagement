@@ -108,17 +108,42 @@ func TestBigBearIsDeadAndNamesTheOrgSuccessor(t *testing.T) {
 
 func TestTheRecasaosCatalogueHasACopyOnAnotherHost(t *testing.T) {
 	logger.LogInitConsoleOnly()
-	const legacy = "https://raw.githubusercontent.com/ReCasaOS/_appstore/catalogue/store/recasaos.zip"
+	asked := []string{}
 	head := func(url string) (*http.Response, error) {
-		if url == legacy {
+		asked = append(asked, url)
+		if url == recasaosCatalogueGitHubRaw {
 			return &http.Response{StatusCode: http.StatusBadGateway}, nil
 		}
 
 		return &http.Response{StatusCode: http.StatusOK, ContentLength: 9}, nil
 	}
 
-	source, _, err := pickCatalogueSource(legacy, head)
-	if err != nil || (source != recasaosCatalogue && source != recasaosCatalogueGitHub) {
+	source, _, err := pickCatalogueSource(recasaosCatalogueGitHubRaw, head)
+	if err != nil || source != recasaosCatalogue {
 		t.Fatalf("got %q %v", source, err)
+	}
+	if len(asked) != 2 || asked[0] != recasaosCatalogueGitHubRaw || asked[1] != recasaosCatalogue {
+		t.Fatalf("legacy then org: %v", asked)
+	}
+}
+
+func TestTheLegacyRawZipTriesOrgThenGitHub(t *testing.T) {
+	logger.LogInitConsoleOnly()
+	asked := []string{}
+	head := func(url string) (*http.Response, error) {
+		asked = append(asked, url)
+		if url == recasaosCatalogueGitHub {
+			return &http.Response{StatusCode: http.StatusOK, ContentLength: 9}, nil
+		}
+		return &http.Response{StatusCode: http.StatusBadGateway}, nil
+	}
+
+	source, _, err := pickCatalogueSource(recasaosCatalogueGitHubRaw, head)
+	if err != nil || source != recasaosCatalogueGitHub {
+		t.Fatalf("got %q %v", source, err)
+	}
+	want := []string{recasaosCatalogueGitHubRaw, recasaosCatalogue, recasaosCatalogueGitHub}
+	if len(asked) != 3 || asked[0] != want[0] || asked[1] != want[1] || asked[2] != want[2] {
+		t.Fatalf("want %v, got %v", want, asked)
 	}
 }

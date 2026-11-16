@@ -52,7 +52,8 @@ var catalogueMirrors = map[string]string{
 	"https://github.com/IceWhaleTech/_appstore/archive/refs/heads/main.zip": mirrorZip,
 	// the ReCasaOS catalogue: org first, then the GitHub Release zip
 	recasaosCatalogue: recasaosCatalogueGitHub,
-	// a box that still names the old raw GitHub zip tries the org next
+	// a box that still names the old raw GitHub zip tries the org next,
+	// then the GitHub Release (the org's own mirror)
 	recasaosCatalogueGitHubRaw: recasaosCatalogue,
 }
 
@@ -70,34 +71,53 @@ func SuccessorOf(url string) (successor string, dead bool) {
 	return
 }
 
-// pickCatalogueSource asks the catalogue's URL whether it answers, and its
-// mirror when it does not. It returns the URL to fetch and the answer, whose
-// ContentLength says whether anything changed.
+// pickCatalogueSource asks the catalogue's URL whether it answers, then each
+// mirror in turn. IceWhale URLs have one hop; the legacy ReCasaOS raw zip
+// follows org, then the GitHub Release. It returns the URL to fetch and the
+// answer, whose ContentLength says whether anything changed.
 func pickCatalogueSource(url string, head func(string) (*http.Response, error)) (string, *http.Response, error) {
-	res, err := head(url)
-	if err == nil && res.StatusCode == http.StatusOK {
-		return url, res, nil
-	}
+	seen := map[string]struct{}{}
+	current := url
+	var lastErr error
 
-	if err == nil {
-		err = fmt.Errorf("failed to get appstore size, status code: %d", res.StatusCode)
-	}
+	for {
+		if _, already := seen[current]; already {
+			return "", nil, lastErr
+		}
+		seen[current] = struct{}{}
 
-	mirror, ok := catalogueMirrors[url]
-	if !ok {
-		return "", nil, err
-	}
+		res, headErr := head(current)
+		if headErr == nil && res.StatusCode == http.StatusOK {
+			return current, res, nil
+		}
+		if res != nil && res.Body != nil {
+			res.Body.Close()
+		}
 
-	logger.Warn("the catalogue does not answer; trying this distribution's copy of it",
-		zap.String("url", url), zap.String("mirror", mirror), zap.Error(err))
+		hopErr := headErr
+		if hopErr == nil {
+			hopErr = fmt.Errorf("failed to get appstore size, status code: %d", res.StatusCode)
+		}
 
-	res, mirrorErr := head(mirror)
-	if mirrorErr != nil {
-		return "", nil, fmt.Errorf("%w (and the mirror: %v)", err, mirrorErr)
-	}
-	if res.StatusCode != http.StatusOK {
-		return "", nil, fmt.Errorf("%w (and the mirror answered %d)", err, res.StatusCode)
-	}
+		if lastErr == nil {
+			lastErr = hopErr
+		} else if headErr != nil {
+			lastErr = fmt.Errorf("%w (and the mirror: %v)", lastErr, headErr)
+		} else {
+			lastErr = fmt.Errorf("%w (and the mirror answered %d)", lastErr, res.StatusCode)
+		}
 
-	return mirror, res, nil
+		mirror, ok := catalogueMirrors[current]
+		if !ok {
+			return "", nil, lastErr
+		}
+		if _, hop := seen[mirror]; hop {
+			return "", nil, lastErr
+		}
+
+		logger.Warn("the catalogue does not answer; trying this distribution's copy of it",
+			zap.String("url", current), zap.String("mirror", mirror), zap.Error(hopErr))
+
+		current = mirror
+	}
 }
