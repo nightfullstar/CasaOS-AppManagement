@@ -3,6 +3,8 @@ package service
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,11 +19,14 @@ import (
 	"github.com/ReCasaOS/CasaOS-Common/utils/logger"
 )
 
+const dummyInZipSHA = "0000000000000000000000000000000000000000000000000000000000000000"
+const badIndexSHA = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
 func TestRefreshDownloadsWhenContentLengthIsUnchangedButETagDiffers(t *testing.T) {
 	logger.LogInitConsoleOnly()
 	zipped := catalogZip(t, "", "alpha", "beta")
 	var downloads int
-	srv := serveCatalogue(t, zipped, `"etag-new"`, &downloads)
+	srv := serveCatalogue(t, zipped, `"etag-new"`, "", &downloads)
 	defer srv.Close()
 
 	s := newRefreshStore(t, srv.URL+"/store/recasaos.zip")
@@ -40,7 +45,7 @@ func TestRefreshSkipsWhenETagMatches(t *testing.T) {
 	logger.LogInitConsoleOnly()
 	zipped := catalogZip(t, "", "alpha", "beta")
 	var downloads int
-	srv := serveCatalogue(t, zipped, `"etag-same"`, &downloads)
+	srv := serveCatalogue(t, zipped, `"etag-same"`, "", &downloads)
 	defer srv.Close()
 
 	s := newRefreshStore(t, srv.URL+"/store/recasaos.zip")
@@ -56,11 +61,54 @@ func TestRefreshSkipsWhenETagMatches(t *testing.T) {
 	}
 }
 
+func TestRefreshSkipsWhenLastSHA256MatchesSiblingIndex(t *testing.T) {
+	logger.LogInitConsoleOnly()
+	zipped := catalogZip(t, dummyInZipSHA, "alpha", "beta")
+	sum := sha256Hex(zipped)
+	var downloads int
+	srv := serveCatalogue(t, zipped, `"etag-new"`, sum, &downloads)
+	defer srv.Close()
+
+	s := newRefreshStore(t, srv.URL+"/store/recasaos.zip")
+	s.lastETag = `"etag-old"`
+	s.lastSHA256 = sum
+
+	if err := s.UpdateCatalog(); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if downloads != 0 {
+		t.Fatalf("matching sibling index digest must skip the zip GET, got %d", downloads)
+	}
+}
+
+func TestRefreshAcceptsWhenExternalIndexHashMatches(t *testing.T) {
+	logger.LogInitConsoleOnly()
+	zipped := catalogZip(t, dummyInZipSHA, "alpha", "beta")
+	sum := sha256Hex(zipped)
+	var downloads int
+	srv := serveCatalogue(t, zipped, `"etag-ok"`, sum, &downloads)
+	defer srv.Close()
+
+	s := newRefreshStore(t, srv.URL+"/store/recasaos.zip")
+	if err := s.UpdateCatalog(); err != nil {
+		t.Fatalf("matching sibling index must accept the catalog: %v", err)
+	}
+	if downloads == 0 {
+		t.Fatal("want a zip GET when lastSHA256 is empty")
+	}
+	if got := len(s.catalog); got != 2 {
+		t.Fatalf("catalog len=%d, want 2", got)
+	}
+	if !strings.EqualFold(s.lastSHA256, sum) {
+		t.Fatalf("lastSHA256=%s, want zip digest %s", s.lastSHA256, sum)
+	}
+}
+
 func TestRefreshKeepsCatalogWhenStoreIndexHashMismatches(t *testing.T) {
 	logger.LogInitConsoleOnly()
-	zipped := catalogZip(t, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "alpha", "beta")
+	zipped := catalogZip(t, dummyInZipSHA, "alpha", "beta")
 	var downloads int
-	srv := serveCatalogue(t, zipped, `"etag-bad-hash"`, &downloads)
+	srv := serveCatalogue(t, zipped, `"etag-bad-hash"`, badIndexSHA, &downloads)
 	defer srv.Close()
 
 	s := newRefreshStore(t, srv.URL+"/store/recasaos.zip")
@@ -78,7 +126,7 @@ func TestRefreshRefusesWhenAppCountShrinks(t *testing.T) {
 	logger.LogInitConsoleOnly()
 	zipped := catalogZip(t, "", "only")
 	var downloads int
-	srv := serveCatalogue(t, zipped, `"etag-shrink"`, &downloads)
+	srv := serveCatalogue(t, zipped, `"etag-shrink"`, "", &downloads)
 	defer srv.Close()
 
 	s := newRefreshStore(t, srv.URL+"/store/recasaos.zip")
@@ -94,6 +142,76 @@ func TestRefreshRefusesWhenAppCountShrinks(t *testing.T) {
 	mustExist(t, filepath.Join(workdir, common.AppsDirectoryName, "legacy", common.ComposeYAMLFileName))
 }
 
+func TestRefreshDoesNotKeepATinyFirstCatalog(t *testing.T) {
+	logger.LogInitConsoleOnly()
+	zipped := catalogZip(t, "", "only")
+	var downloads int
+	srv := serveCatalogue(t, zipped, `"etag-first-tiny"`, "", &downloads)
+	defer srv.Close()
+
+	s := newRefreshStore(t, srv.URL+"/store/recasaos.zip")
+	workdir, err := s.WorkDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdateCatalog(); err == nil {
+		t.Fatal("want a 1-app first fetch to be refused")
+	}
+	if _, err := os.Stat(workdir); !os.IsNotExist(err) {
+		t.Fatalf("tiny first catalog must not stick at %s: %v", workdir, err)
+	}
+}
+
+func TestRefreshDoesNotResumeAStaleZip(t *testing.T) {
+	logger.LogInitConsoleOnly()
+	zipped := catalogZip(t, "", "alpha", "beta")
+	var downloads int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, storeIndexFile) || strings.HasSuffix(r.URL.Path, ".sha256") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("ETag", `"etag-stale"`)
+		w.Header().Set("Content-Length", strconv.Itoa(len(zipped)))
+		w.Header().Set("Accept-Ranges", "bytes")
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Header.Get("Range") != "" {
+			t.Errorf("stale workdir.zip must not be range-resumed, Range=%s", r.Header.Get("Range"))
+		}
+		downloads++
+		_, _ = w.Write(zipped)
+	}))
+	defer srv.Close()
+
+	s := newRefreshStore(t, srv.URL+"/store/recasaos.zip")
+	workdir, err := s.WorkDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipPath := workdir + ".zip"
+	if err := os.MkdirAll(filepath.Dir(zipPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stale := bytes.Repeat([]byte("X"), len(zipped)+64)
+	if err := os.WriteFile(zipPath, stale, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdateCatalog(); err != nil {
+		t.Fatalf("leftover workdir.zip must not be resumed: %v", err)
+	}
+	if downloads == 0 {
+		t.Fatal("want a full zip GET, not a skip of an existing workdir.zip")
+	}
+	if got := len(s.catalog); got != 2 {
+		t.Fatalf("catalog len=%d, want 2", got)
+	}
+}
+
 func newRefreshStore(t *testing.T, storeURL string) *appStore {
 	t.Helper()
 	prev := config.AppInfo.AppStorePath
@@ -106,9 +224,28 @@ func newRefreshStore(t *testing.T, storeURL string) *appStore {
 	}
 }
 
-func serveCatalogue(t *testing.T, zipped []byte, etag string, downloads *int) *httptest.Server {
+func serveCatalogue(t *testing.T, zipped []byte, etag, indexSHA string, downloads *int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sha256") {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, storeIndexFile) {
+			if indexSHA == "" {
+				http.NotFound(w, r)
+				return
+			}
+			body := fmt.Sprintf(`{"schema":"recasaos.store-index.v1","sha256":"%s"}`, indexSHA)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			_, _ = fmt.Fprint(w, body)
+			return
+		}
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Content-Length", strconv.Itoa(len(zipped)))
 		if r.Method == http.MethodHead {
@@ -135,7 +272,7 @@ func catalogZip(t *testing.T, indexSHA string, names ...string) []byte {
 		}
 	}
 	if indexSHA != "" {
-		w, err := zw.Create("store-index.json")
+		w, err := zw.Create(storeIndexFile)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,4 +311,9 @@ func mustExist(t *testing.T, path string) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("want %s still present: %v", path, err)
 	}
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

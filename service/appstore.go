@@ -113,11 +113,14 @@ func (s *appStore) UpdateCatalog() error {
 		logger.Info("appstore etag not changed", zap.String("url", source))
 		return nil
 	}
-	if s.lastSHA256 != "" {
-		if remote, ok := fetchIndexSHA256(source); ok && strings.EqualFold(remote, s.lastSHA256) {
-			logger.Info("appstore index sha256 not changed", zap.String("url", source))
-			return nil
-		}
+
+	// The zip's sha256 lives on the sibling index (or recasaos.zip.sha256),
+	// not inside the zip: a sha256-of-containing-zip cannot be a field of
+	// a file packed into that zip. An in-zip store-index.json is ignored.
+	expected, hasIndex := fetchIndexSHA256(source)
+	if s.lastSHA256 != "" && hasIndex && strings.EqualFold(expected, s.lastSHA256) {
+		logger.Info("appstore index sha256 not changed", zap.String("url", source))
+		return nil
 	}
 	logger.Info("appstore changed, update app store", zap.String("url", source))
 	s.source = source
@@ -138,12 +141,22 @@ func (s *appStore) UpdateCatalog() error {
 		}
 	}()
 
+	// HttpGetter.GetFile range-resumes into dst when the server advertises
+	// Accept-Ranges. A leftover workdir.zip from a previous attempt would
+	// be treated as a prefix of this catalogue.
+	if err := os.Remove(zipPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
 	if err := downloadHelper.DownloadToFile(s.source, zipPath); err != nil {
 		return err
 	}
 
 	sum, err := sha256File(zipPath)
 	if err != nil {
+		return err
+	}
+	if err := verifyZipSHA256(source, sum, expected, hasIndex); err != nil {
 		return err
 	}
 
@@ -155,7 +168,17 @@ func (s *appStore) UpdateCatalog() error {
 	if err != nil {
 		return err
 	}
-	if err := verifyStoreIndexHash(tmpRoot, sum); err != nil {
+
+	catalog, err := BuildCatalog(tmpRoot)
+	if err != nil {
+		return err
+	}
+	if err := s.catalogTooSmall(len(catalog)); err != nil {
+		return err
+	}
+
+	placeholderFile := filepath.Join(tmpRoot, ".casaos-appstore")
+	if err := file.CreateFileAndWriteContent(placeholderFile, s.url); err != nil {
 		return err
 	}
 
@@ -198,23 +221,8 @@ func (s *appStore) UpdateCatalog() error {
 		return err
 	}
 
-	placeholderFile := filepath.Join(storeRoot, ".casaos-appstore")
-	if err := file.CreateFileAndWriteContent(placeholderFile, s.url); err != nil {
-		return err
-	}
-
-	s.catalog, err = BuildCatalog(storeRoot)
-	if err != nil {
-		return err
-	}
-
-	if err := s.catalogTooSmall(len(s.catalog)); err != nil {
-		s.catalog = nil
-		return err
-	}
-
+	s.catalog = catalog
 	s.categoryMap = LoadCategoryMap(storeRoot)
-
 	s.recommend = LoadRecommend(storeRoot)
 
 	s.lastETag = etag
@@ -527,20 +535,37 @@ type storeIndexFileBody struct {
 	SHA256 string `json:"sha256"`
 }
 
-func verifyStoreIndexHash(storeRoot, zipSHA256 string) error {
-	indexPath := filepath.Join(storeRoot, storeIndexFile)
-	if !file.Exists(indexPath) {
+func verifyZipSHA256(zipURL, sum, expected string, hasIndex bool) error {
+	if hasIndex {
+		if !strings.EqualFold(expected, sum) {
+			return fmt.Errorf("%w: index %s zip %s", ErrStoreIndexHashMismatch, expected, sum)
+		}
 		return nil
 	}
-
-	var index storeIndexFileBody
-	if err := json.Unmarshal(file.ReadFullFile(indexPath), &index); err != nil {
-		return fmt.Errorf("%w: %v", ErrStoreIndexHashMismatch, err)
-	}
-	if index.SHA256 == "" || !strings.EqualFold(index.SHA256, zipSHA256) {
-		return fmt.Errorf("%w: index %s zip %s", ErrStoreIndexHashMismatch, index.SHA256, zipSHA256)
+	if sidecar, ok := fetchSidecarSHA256(zipURL); ok && !strings.EqualFold(sidecar, sum) {
+		return fmt.Errorf("%w: sidecar %s zip %s", ErrStoreIndexHashMismatch, sidecar, sum)
 	}
 	return nil
+}
+
+func fetchSidecarSHA256(zipURL string) (string, bool) {
+	res, err := http.Get(zipURL + ".sha256") //nolint:gosec // catalogue URL already picked from the configured store
+	if err != nil {
+		return "", false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", false
+	}
+	buf, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", false
+	}
+	fields := strings.Fields(string(buf))
+	if len(fields) == 0 || len(fields[0]) != 64 {
+		return "", false
+	}
+	return fields[0], true
 }
 
 func fetchIndexSHA256(zipURL string) (string, bool) {
