@@ -101,11 +101,32 @@ func TestDownloadRefusesDirectoryURL(t *testing.T) {
 	assert.ErrorContains(t, Download(srv.URL+"/store/", filepath.Join(t.TempDir(), "store")), "nothing was downloaded")
 }
 
+func TestDownloadToFileLeavesTheZipPacked(t *testing.T) {
+	zipped := storeZip(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(zipped)
+	}))
+	defer srv.Close()
+
+	dst := filepath.Join(t.TempDir(), "store.zip")
+	assert.NilError(t, DownloadToFile(srv.URL+"/store/main.zip", dst))
+
+	got, err := os.ReadFile(dst)
+	assert.NilError(t, err)
+	assert.DeepEqual(t, got, zipped)
+
+	out := t.TempDir()
+	assert.NilError(t, UnpackZip(dst, out))
+	body, err := os.ReadFile(filepath.Join(out, "store", "Apps", "demo", "docker-compose.yml"))
+	assert.NilError(t, err)
+	assert.Equal(t, string(body), "name: demo\n")
+}
+
 // Pins what a later edit must keep: X-Terraform-Get and terraform-get meta
 // redirects stay off, so the server cannot pick the next URL fetched (an
 // internal address, say), .netrc stays unread, and only http and https exist.
 func TestDownloadClientSettings(t *testing.T) {
-	c := newClient("https://example.com/store/main.zip", t.TempDir())
+	c := newClient("https://example.com/store/main.zip", t.TempDir(), getter.ClientModeAny)
 	assert.NilError(t, c.Configure(c.Options...))
 	assert.Assert(t, c.DisableSymlinks)
 	assert.Equal(t, len(c.Getters), 2)

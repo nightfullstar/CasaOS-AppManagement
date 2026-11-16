@@ -2,11 +2,15 @@ package service
 
 import (
 	"crypto/md5" // nolint: gosec
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -37,16 +41,31 @@ type appStore struct {
 	url         string
 
 	lastAPPStoreSize int64
+	lastETag         string
+	lastSHA256       string
+	lastAppCount     int
+	// minAppCount is the floor below which a new catalog is refused. Zero
+	// means the production floor (250) for the ReCasaOS catalogue and no
+	// absolute floor for other stores. Tests inject a smaller value.
+	minAppCount int
 	// source is the URL the last update fetched: the catalogue, or this
 	// distribution's copy of it when the catalogue did not answer.
 	source string
 }
+
+const (
+	minCatalogueApps  = 250
+	minCatalogueRatio = 0.9
+	storeIndexFile    = "store-index.json"
+)
 
 var (
 	appStoreMap = make(map[string]*appStore)
 
 	ErrNotAppStore             = fmt.Errorf("not an appstore")
 	ErrDefaultAppStoreNotFound = fmt.Errorf("default appstore not found")
+	ErrCatalogTooSmall         = fmt.Errorf("catalog is below the size floor")
+	ErrStoreIndexHashMismatch  = fmt.Errorf("store-index sha256 does not match the zip")
 )
 
 func (s *appStore) CategoryMap() (map[string]codegen.CategoryInfo, error) {
@@ -78,44 +97,65 @@ func (s *appStore) UpdateCatalog() error {
 		return err
 	}
 
-	// check wether the zip package size change
-	// if not, skip the update
-	{
-		// timeout 5s
-		http.DefaultClient.Timeout = 5 * time.Second
-		// the catalogue, or this distribution's copy of it when the catalogue
-		// does not answer (appstore_mirror.go)
-		source, res, err := pickCatalogueSource(s.url, http.Head)
-		if err != nil {
-			return err
-		}
-		if res.ContentLength == s.lastAPPStoreSize {
-			logger.Info("appstore size not changed", zap.String("url", source))
+	http.DefaultClient.Timeout = 5 * time.Second
+	// the catalogue, or this distribution's copy of it when the catalogue
+	// does not answer (appstore_mirror.go)
+	source, res, err := pickCatalogueSource(s.url, http.Head)
+	if err != nil {
+		return err
+	}
+	if res != nil && res.Body != nil {
+		defer res.Body.Close()
+	}
+
+	etag := res.Header.Get("ETag")
+	if etag != "" && etag == s.lastETag {
+		logger.Info("appstore etag not changed", zap.String("url", source))
+		return nil
+	}
+	if s.lastSHA256 != "" {
+		if remote, ok := fetchIndexSHA256(source); ok && strings.EqualFold(remote, s.lastSHA256) {
+			logger.Info("appstore index sha256 not changed", zap.String("url", source))
 			return nil
 		}
-		logger.Info("appstore size changed, update app store", zap.String("url", source))
-		s.source = source
-
-		defer func() {
-			if isSuccessful {
-				s.lastAPPStoreSize = res.ContentLength
-			}
-		}()
 	}
+	logger.Info("appstore changed, update app store", zap.String("url", source))
+	s.source = source
 
 	workdir, err := s.WorkDir()
 	if err != nil {
 		return err
 	}
 	tmpDir := workdir + ".tmp"
+	zipPath := workdir + ".zip"
 
 	defer func() {
 		if err := file.RMDir(tmpDir); err != nil {
 			logger.Error("failed to remove temp appstore workdir", zap.Error(err), zap.String("tmpDir", tmpDir))
 		}
+		if err := os.Remove(zipPath); err != nil && !os.IsNotExist(err) {
+			logger.Error("failed to remove temp appstore zip", zap.Error(err), zap.String("zipPath", zipPath))
+		}
 	}()
 
-	if err := downloadHelper.Download(s.source, tmpDir); err != nil {
+	if err := downloadHelper.DownloadToFile(s.source, zipPath); err != nil {
+		return err
+	}
+
+	sum, err := sha256File(zipPath)
+	if err != nil {
+		return err
+	}
+
+	if err := downloadHelper.UnpackZip(zipPath, tmpDir); err != nil {
+		return err
+	}
+
+	tmpRoot, err := StoreRoot(tmpDir)
+	if err != nil {
+		return err
+	}
+	if err := verifyStoreIndexHash(tmpRoot, sum); err != nil {
 		return err
 	}
 
@@ -168,10 +208,19 @@ func (s *appStore) UpdateCatalog() error {
 		return err
 	}
 
+	if err := s.catalogTooSmall(len(s.catalog)); err != nil {
+		s.catalog = nil
+		return err
+	}
+
 	s.categoryMap = LoadCategoryMap(storeRoot)
 
 	s.recommend = LoadRecommend(storeRoot)
 
+	s.lastETag = etag
+	s.lastSHA256 = sum
+	s.lastAppCount = len(s.catalog)
+	s.lastAPPStoreSize = res.ContentLength
 	isSuccessful = true
 
 	return nil
@@ -434,4 +483,109 @@ func StoreRoot(workdir string) (string, error) {
 	}
 
 	return "", ErrNotAppStore
+}
+
+func (s *appStore) catalogTooSmall(n int) error {
+	min := s.minAppCount
+	if min == 0 && s.isReCasaOSCatalogue() {
+		min = minCatalogueApps
+	}
+	if min > 0 && n < min {
+		return fmt.Errorf("%w: %d apps, floor %d", ErrCatalogTooSmall, n, min)
+	}
+	if s.lastAppCount > 0 && float64(n) < float64(s.lastAppCount)*minCatalogueRatio {
+		return fmt.Errorf("%w: %d apps, last successful count %d", ErrCatalogTooSmall, n, s.lastAppCount)
+	}
+	return nil
+}
+
+func (s *appStore) isReCasaOSCatalogue() bool {
+	for _, u := range []string{s.url, s.source} {
+		switch u {
+		case recasaosCatalogue, recasaosCatalogueGitHub, recasaosCatalogueGitHubRaw:
+			return true
+		}
+	}
+	return false
+}
+
+func sha256File(name string) (string, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+type storeIndexFileBody struct {
+	SHA256 string `json:"sha256"`
+}
+
+func verifyStoreIndexHash(storeRoot, zipSHA256 string) error {
+	indexPath := filepath.Join(storeRoot, storeIndexFile)
+	if !file.Exists(indexPath) {
+		return nil
+	}
+
+	var index storeIndexFileBody
+	if err := json.Unmarshal(file.ReadFullFile(indexPath), &index); err != nil {
+		return fmt.Errorf("%w: %v", ErrStoreIndexHashMismatch, err)
+	}
+	if index.SHA256 == "" || !strings.EqualFold(index.SHA256, zipSHA256) {
+		return fmt.Errorf("%w: index %s zip %s", ErrStoreIndexHashMismatch, index.SHA256, zipSHA256)
+	}
+	return nil
+}
+
+func fetchIndexSHA256(zipURL string) (string, bool) {
+	indexURL := siblingIndexURL(zipURL)
+	if indexURL == "" {
+		return "", false
+	}
+
+	res, err := http.Get(indexURL) //nolint:gosec // catalogue URL already picked from the configured store
+	if err != nil {
+		return "", false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", false
+	}
+
+	buf, err := io.ReadAll(res.Body)
+	if err != nil {
+		return "", false
+	}
+
+	var index storeIndexFileBody
+	if err := json.Unmarshal(buf, &index); err != nil || index.SHA256 == "" {
+		return "", false
+	}
+	return index.SHA256, true
+}
+
+func siblingIndexURL(zipURL string) string {
+	switch zipURL {
+	case recasaosCatalogue:
+		return recasaosCatalogueIndex
+	case recasaosCatalogueGitHub:
+		return recasaosCatalogueGitHubIndex
+	}
+
+	u, err := url.Parse(zipURL)
+	if err != nil {
+		return ""
+	}
+	dir := path.Dir(u.Path)
+	if dir == "." || dir == "/" {
+		return ""
+	}
+	u.Path = path.Join(dir, storeIndexFile)
+	return u.String()
 }
