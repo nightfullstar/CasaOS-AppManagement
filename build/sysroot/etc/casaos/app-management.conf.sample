@@ -18,4 +18,4 @@ AppsPath = /var/lib/casaos/apps
 
 [server]
 ; the ReCasaOS catalogue: IceWhale's store, RoqueOS's list and the Big Bear fork, merged every night
-appstore = https://raw.githubusercontent.com/ReCasaOS/_appstore/catalogue/store/recasaos.zip
+appstore = https://recasaos.org/store/recasaos.zip

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -9,6 +8,7 @@ import (
 	interfaces "github.com/ReCasaOS/CasaOS-Common"
 
 	"github.com/ReCasaOS/CasaOS-AppManagement/pkg/config"
+	"github.com/ReCasaOS/CasaOS-AppManagement/service"
 )
 
 type migrationTool0412AndOlder struct{}
@@ -18,7 +18,6 @@ const bigBearAppStoreUrl = "https://github.com/bigbeartechworld/big-bear-casaos/
 func (u *migrationTool0412AndOlder) IsMigrationNeeded() (bool, error) {
 	_logger.Info("Checking if migration is needed...")
 
-	// read string from AppManagementConfigFilePath
 	file, err := os.Open(config.AppManagementConfigFilePath)
 	if err != nil {
 		_logger.Error("failed to detect app management config file: %s", err)
@@ -32,10 +31,11 @@ func (u *migrationTool0412AndOlder) IsMigrationNeeded() (bool, error) {
 	}
 
 	if strings.Contains(string(content), bigBearAppStoreUrl) {
-		_logger.Info("Migration is add big bear app store. it is not needed.")
-		return false, nil
+		_logger.Info("Migration will replace dead Big Bear app store URL.")
+		return true, nil
 	}
-	return true, nil
+	_logger.Info("Big Bear app store migration skipped; URL not present.")
+	return false, nil
 }
 
 func (u *migrationTool0412AndOlder) PreMigrate() error {
@@ -43,7 +43,6 @@ func (u *migrationTool0412AndOlder) PreMigrate() error {
 }
 
 func (u *migrationTool0412AndOlder) Migrate() error {
-	// add big bear app store
 	file, err := os.OpenFile(config.AppManagementConfigFilePath, os.O_RDWR, 0644)
 	if err != nil {
 		_logger.Error("failed to open app management config file: %s", err)
@@ -56,11 +55,23 @@ func (u *migrationTool0412AndOlder) Migrate() error {
 		return err
 	}
 
-	newContent := string(content)
-	newContent += fmt.Sprintf("\nappstore = %s", bigBearAppStoreUrl)
+	if !strings.Contains(string(content), bigBearAppStoreUrl) {
+		return nil
+	}
 
-	_, err = file.WriteString(newContent)
-	if err != nil {
+	successor, dead := service.SuccessorOf(bigBearAppStoreUrl)
+	if !dead {
+		return nil
+	}
+
+	newContent := strings.Replace(string(content), bigBearAppStoreUrl, successor, -1)
+
+	if err = file.Truncate(0); err != nil {
+		_logger.Error("failed to truncate app management config file: %s", err)
+		return err
+	}
+
+	if _, err = file.WriteAt([]byte(newContent), 0); err != nil {
 		_logger.Error("failed to write app management config file: %s", err)
 		return err
 	}
