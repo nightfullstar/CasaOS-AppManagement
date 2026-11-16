@@ -31,17 +31,38 @@ func storeInfoList(storeID int, catalog map[string]*ComposeApp) map[string]codeg
 		if err != nil {
 			continue
 		}
-		applyStoreIcon(info, storeID, composeApp.Name)
+		applyStoreAssets(info, storeID, composeApp.Name)
 		list[appStoreID] = *info
 	}
 	return list
 }
 
 func applyStoreIcon(info *codegen.ComposeAppStoreInfo, storeID int, appID string) {
-	if info == nil || isAbsoluteHTTP(info.Icon) {
+	if info == nil || info.Icon == "" || isAbsoluteHTTP(info.Icon) {
 		return
 	}
 	info.Icon = fmt.Sprintf("/v2/app_management/appstore/%d/apps/%s/icon", storeID, appID)
+}
+
+func applyStoreScreenshots(info *codegen.ComposeAppStoreInfo, storeID int, appID string) {
+	if info == nil {
+		return
+	}
+	out := make([]string, len(info.ScreenshotLink))
+	for i, link := range info.ScreenshotLink {
+		if link == "" || isAbsoluteHTTP(link) {
+			out[i] = link
+			continue
+		}
+		name := filepath.Base(link)
+		out[i] = fmt.Sprintf("/v2/app_management/appstore/%d/apps/%s/screenshot/%s", storeID, appID, name)
+	}
+	info.ScreenshotLink = out
+}
+
+func applyStoreAssets(info *codegen.ComposeAppStoreInfo, storeID int, appID string) {
+	applyStoreIcon(info, storeID, appID)
+	applyStoreScreenshots(info, storeID, appID)
 }
 
 func isAbsoluteHTTP(icon string) bool {
@@ -56,7 +77,7 @@ func (a *AppStoreManagement) ComposeStoreInfo(composeApp *ComposeApp, includeApp
 		return nil, err
 	}
 	if id, ok := a.storeIDForApp(composeApp.Name); ok {
-		applyStoreIcon(info, id, composeApp.Name)
+		applyStoreAssets(info, id, composeApp.Name)
 	}
 	return info, nil
 }
@@ -77,20 +98,33 @@ func (a *AppStoreManagement) storeIDForApp(appID string) (int, bool) {
 	return id, found
 }
 
-// IconFile is Apps/{app}/icon.{png|jpg|webp|svg} in that store's workdir.
-func (a *AppStoreManagement) IconFile(storeID int, app string) (path, contentType string, err error) {
+func (a *AppStoreManagement) storeWorkDir(storeID int) (string, error) {
 	if storeID < 0 || storeID >= len(config.ServerInfo.AppStoreList) {
-		return "", "", os.ErrNotExist
+		return "", os.ErrNotExist
 	}
 	store, err := AppStoreByURL(config.ServerInfo.AppStoreList[storeID])
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	workdir, err := store.WorkDir()
+	return store.WorkDir()
+}
+
+// IconFile is Apps/{app}/icon.{png|jpg|webp|svg} in that store's workdir.
+func (a *AppStoreManagement) IconFile(storeID int, app string) (path, contentType string, err error) {
+	workdir, err := a.storeWorkDir(storeID)
 	if err != nil {
 		return "", "", err
 	}
 	return FindStoreAppIcon(workdir, app)
+}
+
+// ScreenshotFile is Apps/{app}/{name} in that store's workdir.
+func (a *AppStoreManagement) ScreenshotFile(storeID int, app, name string) (path, contentType string, err error) {
+	workdir, err := a.storeWorkDir(storeID)
+	if err != nil {
+		return "", "", err
+	}
+	return FindStoreAppScreenshot(workdir, app, name)
 }
 
 // FindStoreAppIcon locates the first icon file for app under workdir.
@@ -109,6 +143,45 @@ func FindStoreAppIcon(workdir, app string) (path, contentType string, err error)
 		if file.Exists(p) {
 			return p, icon.contentType, nil
 		}
+	}
+	return "", "", os.ErrNotExist
+}
+
+func storeImageContentType(ext string) string {
+	ext = strings.ToLower(ext)
+	if ext == ".jpeg" {
+		return "image/jpeg"
+	}
+	for _, icon := range storeIconFiles {
+		if icon.ext == ext {
+			return icon.contentType
+		}
+	}
+	return ""
+}
+
+func safeStoreName(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\`) && filepath.Base(name) == name
+}
+
+// FindStoreAppScreenshot locates a screenshot file for app under workdir.
+func FindStoreAppScreenshot(workdir, app, name string) (path, contentType string, err error) {
+	if !safeStoreName(app) || !safeStoreName(name) {
+		return "", "", os.ErrNotExist
+	}
+	contentType = storeImageContentType(filepath.Ext(name))
+	if contentType == "" {
+		return "", "", os.ErrNotExist
+	}
+
+	storeRoot, err := StoreRoot(workdir)
+	if err != nil {
+		return "", "", err
+	}
+
+	p := filepath.Join(storeRoot, common.AppsDirectoryName, app, name)
+	if file.Exists(p) {
+		return p, contentType, nil
 	}
 	return "", "", os.ErrNotExist
 }

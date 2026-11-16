@@ -33,6 +33,7 @@ var parameterValues = map[string][2]string{
 	"key":             {"OPENAI_API_KEY", "OPENAI_API_KEY"},
 	"backup_id":       {"b1", "b1"},
 	"verification_id": {"v1", "v1"},
+	"file":            {"screenshot-1.png", "screenshot-1.png"},
 }
 
 // containerAndStats are the paths whose `id` is a container or a stats item, not an app name.
@@ -48,6 +49,8 @@ func idValues(path string) [][2]string {
 		}
 	case strings.HasSuffix(path, "/visibility/accounts/:id"):
 		return [][2]string{{"2", "2"}}
+	case strings.Contains(path, "/appstore/:id"):
+		return [][2]string{{"0", "0"}}
 	}
 	return [][2]string{parameterValues["id"]}
 }
@@ -80,6 +83,8 @@ var sameForTheOwner = map[string]string{
 	"/v2/app_management/backup/destinations/:name/runs/:app/:stamp/files": "no rclone in the harness: the hidden app is asked about under a probe name, and the owner's read fails as an unknown one does",
 	"/v2/app_management/git/:app":                                         "no Docker daemon in the harness: the owner's read fails at it too",
 	"/v2/app_management/git/:app/tags":                                    "no Docker daemon in the harness, as above",
+	"/v2/app_management/appstore/:id/apps/:app/icon":                      "catalogue icon file, the same for everyone",
+	"/v2/app_management/appstore/:id/apps/:app/screenshot/:file":          "catalogue screenshot file, the same for everyone",
 }
 
 // writes are refused to a user before any handler reads the name; the owner is not asked

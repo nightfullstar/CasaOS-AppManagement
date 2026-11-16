@@ -65,6 +65,22 @@ func isLogsStream(c echo.Context) bool {
 	return c.Request().Method == http.MethodGet && c.Path() == V2APIPath+"/logs/stream"
 }
 
+// isStoreAsset is a catalogue icon or screenshot GET: a browser <img> cannot
+// send Authorization, so the JWT is accepted as ?token= the same way the
+// logs stream does.
+func isStoreAsset(c echo.Context) bool {
+	if c.Request().Method != http.MethodGet {
+		return false
+	}
+	switch c.Path() {
+	case V2APIPath + "/appstore/:id/apps/:app/icon",
+		V2APIPath + "/appstore/:id/apps/:app/screenshot/:file":
+		return true
+	default:
+		return false
+	}
+}
+
 func InitV2Router() http.Handler {
 	appManagement := v2Route.NewAppManagement()
 
@@ -101,7 +117,7 @@ func InitV2Router() http.Handler {
 		TokenLookupFuncs: []echo_middleware.ValuesExtractor{
 			func(c echo.Context) ([]string, error) {
 				authorization := c.Request().Header.Get(echo.HeaderAuthorization)
-				if authorization == "" && isLogsStream(c) {
+				if authorization == "" && (isLogsStream(c) || isStoreAsset(c)) {
 					return []string{c.QueryParam("token")}, nil
 				}
 				return []string{jwt.TokenFromAuthorization(authorization)}, nil

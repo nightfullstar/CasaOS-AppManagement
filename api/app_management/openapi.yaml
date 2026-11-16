@@ -312,16 +312,57 @@ paths:
       description: |
         Reads `Apps/{app}/icon.png` (or `.jpg`, `.webp`, `.svg`) from the registered
         store's unpacked workdir. Relative `x-casaos.icon` values are rewritten to this
-        path when StoreInfo is assembled. Same JWT as other appstore GETs.
+        path when StoreInfo is assembled. Same JWT as other appstore GETs. A browser
+        `<img>` cannot send Authorization, so the JWT is also accepted as `?token=`.
       operationId: appStoreAppIcon
       tags:
         - AppStore methods
       parameters:
         - $ref: "#/components/parameters/AppStoreID"
         - $ref: "#/components/parameters/AppStoreAppID"
+        - $ref: "#/components/parameters/AppStoreAssetToken"
       responses:
         "200":
           description: The icon file
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            image/svg+xml:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/ResponseNotFound"
+
+  /appstore/{id}/apps/{app}/screenshot/{file}:
+    get:
+      summary: Serve a catalogue app screenshot from this store's workdir
+      description: |
+        Reads `Apps/{app}/{file}` from the registered store's unpacked workdir.
+        Relative `x-casaos.screenshot_link` values are rewritten to this path when
+        StoreInfo is assembled. Same JWT as other appstore GETs, including `?token=`
+        for a browser `<img>`.
+      operationId: appStoreAppScreenshot
+      tags:
+        - AppStore methods
+      parameters:
+        - $ref: "#/components/parameters/AppStoreID"
+        - $ref: "#/components/parameters/AppStoreAppID"
+        - $ref: "#/components/parameters/AppStoreScreenshotFile"
+        - $ref: "#/components/parameters/AppStoreAssetToken"
+      responses:
+        "200":
+          description: The screenshot file
           content:
             image/png:
               schema:
@@ -2652,6 +2693,22 @@ components:
       schema:
         type: string
         example: "immich"
+
+    AppStoreScreenshotFile:
+      name: file
+      description: Screenshot filename in the app directory (e.g. screenshot-1.png)
+      in: path
+      required: true
+      schema:
+        type: string
+        example: "screenshot-1.png"
+
+    AppStoreAssetToken:
+      name: token
+      description: The JWT, for a browser img which cannot send a header.
+      in: query
+      schema:
+        type: string
 
     StoreAppIDString:
       name: id

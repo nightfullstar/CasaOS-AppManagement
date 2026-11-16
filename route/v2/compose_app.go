@@ -95,7 +95,7 @@ func (a *AppManagement) MyComposeApp(ctx echo.Context, id codegen.ComposeAppID) 
 	// A missing `x-casaos` is not a failure: the app grid has always answered for such
 	// a stack with no store info rather than an error, and this endpoint describes the
 	// same apps. Anything else wrong with the extension still is one.
-	storeInfo, err := composeApp.StoreInfo(true)
+	storeInfo, err := service.MyService.AppStoreManagement().ComposeStoreInfo(composeApp, true)
 	if err != nil && !errors.Is(err, service.ErrComposeExtensionNameXCasaOSNotFound) {
 		message := err.Error()
 		return ctx.JSON(http.StatusInternalServerError, codegen.ResponseInternalServerError{

@@ -97,6 +97,11 @@ func (s *appStore) UpdateCatalog() error {
 		return err
 	}
 
+	if _, dead := SuccessorOf(s.url); dead {
+		logger.Info("appstore URL is a known-dead source; keeping last-good", zap.String("url", s.url))
+		return nil
+	}
+
 	http.DefaultClient.Timeout = 5 * time.Second
 	// the catalogue, or this distribution's copy of it when the catalogue
 	// does not answer (appstore_mirror.go)

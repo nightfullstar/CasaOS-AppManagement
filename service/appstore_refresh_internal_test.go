@@ -163,6 +163,37 @@ func TestRefreshDoesNotKeepATinyFirstCatalog(t *testing.T) {
 	}
 }
 
+func TestUpdateCatalogDoesNotPollADeadStore(t *testing.T) {
+	logger.LogInitConsoleOnly()
+
+	const dead = "https://github.com/bigbeartechworld/big-bear-casaos/archive/refs/heads/master.zip"
+	prev := http.DefaultClient
+	t.Cleanup(func() { http.DefaultClient = prev })
+	http.DefaultClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("a hard-coded dead store URL must not be polled")
+		return nil, fmt.Errorf("unreachable")
+	})}
+
+	s := &appStore{
+		url:      dead,
+		catalog:  map[string]*ComposeApp{"legacy": {}},
+		lastETag: `"keep"`,
+	}
+	if err := s.UpdateCatalog(); err != nil {
+		t.Fatalf("dead store must keep last-good without error: %v", err)
+	}
+	if s.lastETag != `"keep"` {
+		t.Fatalf("last-good etag mutated: %q", s.lastETag)
+	}
+	if _, ok := s.catalog["legacy"]; !ok {
+		t.Fatal("last-good catalog must remain")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 func TestRefreshDoesNotResumeAStaleZip(t *testing.T) {
 	logger.LogInitConsoleOnly()
 	zipped := catalogZip(t, "", "alpha", "beta")

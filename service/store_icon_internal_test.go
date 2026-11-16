@@ -32,6 +32,31 @@ x-casaos:
   main: syncthing
 `
 
+const emptyIconYAML = `name: emptyicon
+services:
+  emptyicon:
+    image: test/empty:1
+x-casaos:
+  icon: ""
+  title:
+    en_us: Empty
+  main: emptyicon
+`
+
+const relativeScreenshotsYAML = `name: immich
+services:
+  immich:
+    image: test/immich:1
+x-casaos:
+  icon: icon.png
+  screenshot_link:
+    - screenshot-1.png
+    - https://cdn.example/shot.png
+  title:
+    en_us: Immich
+  main: immich
+`
+
 func TestRelativeIconBecomesTheGatewayPathWhenTheListIsBuilt(t *testing.T) {
 	logger.LogInitConsoleOnly()
 
@@ -131,6 +156,52 @@ func TestIconFileFindsPNGInTheStoreWorkdir(t *testing.T) {
 	}
 }
 
+func TestScreenshotFileFindsPNGInTheStoreWorkdir(t *testing.T) {
+	logger.LogInitConsoleOnly()
+
+	prevList, prevPath := config.ServerInfo.AppStoreList, config.AppInfo.AppStorePath
+	config.AppInfo.AppStorePath = t.TempDir()
+	config.ServerInfo.AppStoreList = []string{"https://icons.test/shot-file.zip"}
+	t.Cleanup(func() {
+		config.ServerInfo.AppStoreList = prevList
+		config.AppInfo.AppStorePath = prevPath
+	})
+
+	store, err := AppStoreByURL(config.ServerInfo.AppStoreList[0])
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	workdir, err := store.WorkDir()
+	if err != nil {
+		t.Fatalf("workdir: %v", err)
+	}
+	shotPath := filepath.Join(workdir, common.AppsDirectoryName, "immich", "screenshot-1.png")
+	if err := os.MkdirAll(filepath.Dir(shotPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shotPath, []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	path, contentType, err := NewAppStoreManagement().ScreenshotFile(0, "immich", "screenshot-1.png")
+	if err != nil {
+		t.Fatalf("ScreenshotFile: %v", err)
+	}
+	if path != shotPath {
+		t.Fatalf("got path %q want %q", path, shotPath)
+	}
+	if contentType != "image/png" {
+		t.Fatalf("got %q", contentType)
+	}
+
+	if _, _, err := NewAppStoreManagement().ScreenshotFile(0, "immich", "../icon.png"); err == nil {
+		t.Fatal("path traversal must 404")
+	}
+	if _, _, err := NewAppStoreManagement().ScreenshotFile(0, "immich", "notes.txt"); err == nil {
+		t.Fatal("non-image must 404")
+	}
+}
+
 func TestAbsoluteIconStaysOnTheList(t *testing.T) {
 	logger.LogInitConsoleOnly()
 
@@ -142,5 +213,46 @@ func TestAbsoluteIconStaysOnTheList(t *testing.T) {
 	list := storeInfoList(0, map[string]*ComposeApp{app.Name: app})
 	if list[app.Name].Icon != "https://cdn.example/icon.png" {
 		t.Fatalf("https icon must stay, got %q", list[app.Name].Icon)
+	}
+}
+
+func TestEmptyIconStaysEmpty(t *testing.T) {
+	logger.LogInitConsoleOnly()
+
+	app, err := NewComposeAppFromYAML([]byte(emptyIconYAML), true, false)
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+
+	list := storeInfoList(0, map[string]*ComposeApp{app.Name: app})
+	if list[app.Name].Icon != "" {
+		t.Fatalf("empty icon must stay empty, not become a 404 URL, got %q", list[app.Name].Icon)
+	}
+}
+
+func TestRelativeScreenshotsBecomeTheGatewayPathWhenTheListIsBuilt(t *testing.T) {
+	logger.LogInitConsoleOnly()
+
+	app, err := NewComposeAppFromYAML([]byte(relativeScreenshotsYAML), true, false)
+	if err != nil {
+		t.Fatalf("compose: %v", err)
+	}
+
+	raw, err := app.StoreInfo(false)
+	if err != nil {
+		t.Fatalf("StoreInfo: %v", err)
+	}
+	if len(raw.ScreenshotLink) != 2 || raw.ScreenshotLink[0] != "screenshot-1.png" {
+		t.Fatalf("ComposeApp.StoreInfo must stay store-id-agnostic, got %v", raw.ScreenshotLink)
+	}
+
+	list := storeInfoList(0, map[string]*ComposeApp{app.Name: app})
+	got := list[app.Name].ScreenshotLink
+	want := []string{
+		"/v2/app_management/appstore/0/apps/immich/screenshot/screenshot-1.png",
+		"https://cdn.example/shot.png",
+	}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("relative screenshot_link must become the gateway path, got %v", got)
 	}
 }
